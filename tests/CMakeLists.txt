@@ -1,0 +1,43 @@
+function(servicelocator_strict_warnings target)
+    target_link_libraries(${target} PRIVATE servicelocator::servicelocator)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /WX /permissive-)
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
+endfunction()
+
+foreach(name resolution_test lifecycle_test isolation_test threading_test)
+    add_executable(${name} ${name}.cpp)
+    servicelocator_strict_warnings(${name})
+    add_test(NAME ${name} COMMAND ${name})
+endforeach()
+
+add_executable(misuse_test misuse_test.cpp)
+servicelocator_strict_warnings(misuse_test)
+
+function(servicelocator_misuse_case scenario pattern)
+    add_test(NAME misuse.${scenario} COMMAND misuse_test ${scenario})
+    set_tests_properties(misuse.${scenario} PROPERTIES
+        PASS_REGULAR_EXPRESSION "servicelocator error: [^\n]*${pattern}")
+endfunction()
+
+servicelocator_misuse_case(no_winner "no candidate's ShouldRegister returned true")
+servicelocator_misuse_case(two_winners "Two ShouldRegister returned true")
+servicelocator_misuse_case(two_fallbacks "Two fallback ShouldRegister returned true")
+servicelocator_misuse_case(register_cycle "ShouldRegister cycle")
+servicelocator_misuse_case(ready_cycle "Cycle in the service OnReady graph")
+servicelocator_misuse_case(overflow "Service slot overflow")
+servicelocator_misuse_case(create_twice "CreateAllServices\\(\\) ran twice")
+servicelocator_misuse_case(two_bases "candidate for two different Base slots")
+servicelocator_misuse_case(second_thread "needs resolution on a second thread")
+
+if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
+    add_library(servicelocator_archive STATIC archived_service.cpp)
+    servicelocator_strict_warnings(servicelocator_archive)
+    add_executable(whole_archive_test whole_archive_test.cpp)
+    servicelocator_strict_warnings(whole_archive_test)
+    target_link_libraries(whole_archive_test PRIVATE
+        "$<LINK_LIBRARY:WHOLE_ARCHIVE,servicelocator_archive>")
+    add_test(NAME whole_archive_test COMMAND whole_archive_test)
+endif()
