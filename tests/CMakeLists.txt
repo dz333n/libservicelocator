@@ -31,6 +31,7 @@ servicelocator_misuse_case(overflow "Service slot overflow")
 servicelocator_misuse_case(create_twice "CreateAllServices\\(\\) ran twice")
 servicelocator_misuse_case(two_bases "candidate for two different Base slots")
 servicelocator_misuse_case(second_thread "needs resolution on a second thread")
+servicelocator_misuse_case(instance_hook "\\[instance hook\\] Get<")
 
 if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
     add_library(servicelocator_archive STATIC archived_service.cpp)

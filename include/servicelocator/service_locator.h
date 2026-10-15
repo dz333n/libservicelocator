@@ -125,8 +125,12 @@ private:
         int                         base_slot = kNoSlot;
     };
 
-    [[noreturn]] static void Fail(const std::string& message) {
-        Derived::OnLocatorError(message.c_str());
+    [[noreturn]] void Fail(const std::string& message) {
+        if constexpr (std::is_member_function_pointer_v<decltype(&Derived::OnLocatorError)>) {
+            static_cast<Derived&>(*this).OnLocatorError(message.c_str());
+        } else {
+            Derived::OnLocatorError(message.c_str());
+        }
     }
 
     static std::vector<Factory>& Factories() {
@@ -134,7 +138,7 @@ private:
         return factories;
     }
 
-    static int AllocateSlot(const char* type_name) {
+    int AllocateSlot(const char* type_name) {
         const int slot = next_slot_.fetch_add(1, std::memory_order_relaxed);
         if (slot >= Capacity) {
             Fail(std::string("Service slot overflow: slot ") + std::to_string(slot) +
@@ -145,7 +149,7 @@ private:
     }
 
     template <class T>
-    static int SlotFor() {
+    int SlotFor() {
         static const int slot = AllocateSlot(typeid(T).name());
         return slot;
     }
@@ -166,7 +170,7 @@ private:
     }
 
     template <class T>
-    static void MakeReady(T* svc) {
+    void MakeReady(T* svc) {
         if constexpr (std::is_base_of_v<Service, T>) {
             Service* base = svc;
             if (base->EnsureReady() == Service::ReadyResult::Cycle) {

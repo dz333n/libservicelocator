@@ -112,6 +112,22 @@ public:
     using TwoBasesInner::TwoBasesInner;
 };
 
+class InstanceHookLocator : public servicelocator::ServiceLocator<InstanceHookLocator, 8> {
+public:
+    [[noreturn]] void OnLocatorError(const char* message) {
+        std::printf("servicelocator error: [%s] %s\n", owner_, message);
+        std::fflush(stdout);
+        std::exit(0);
+    }
+
+private:
+    const char* owner_ = "instance hook";
+};
+class InstanceHookMissing : public servicelocator::Service {
+public:
+    explicit InstanceHookMissing(InstanceHookLocator&) {}
+};
+
 class SecondThreadLocator : public MisuseLocator<SecondThreadLocator, 8> {};
 class SecondThreadTarget : public servicelocator::Service {
 public:
@@ -178,6 +194,10 @@ static void RunScenario(const char* name) {
     } else if (std::strcmp(name, "two_bases") == 0) {
         TwoBasesLocator locator;
         locator.Bootstrap();
+    } else if (std::strcmp(name, "instance_hook") == 0) {
+        InstanceHookLocator locator;
+        locator.Bootstrap();
+        locator.Get<InstanceHookMissing>();
     } else if (std::strcmp(name, "second_thread") == 0) {
         SecondThreadLocator locator;
         locator.Bootstrap();
