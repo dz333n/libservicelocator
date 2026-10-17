@@ -1,5 +1,3 @@
-# libservicelocator
+# libServiceLocator
 
-## License
-
-MIT. See `LICENSE`.
+Service locator attempt in C++
