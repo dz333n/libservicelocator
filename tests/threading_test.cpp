@@ -49,10 +49,45 @@ private:
     ThreadLocator& locator_;
 };
 
+class BorrowTarget;
+
+class BorrowLocator : public servicelocator::ServiceLocator<BorrowLocator, 8> {
+public:
+    SL_FAIL_ON_LOCATOR_ERROR
+
+    ~BorrowLocator() { TearDown(); }
+
+    BorrowTarget* helper_target = nullptr;
+};
+
+class BorrowTarget : public servicelocator::Service {
+public:
+    explicit BorrowTarget(BorrowLocator&) {}
+};
+
+class BorrowWaiter : public servicelocator::Service {
+public:
+    explicit BorrowWaiter(BorrowLocator& locator) : locator_(locator) {}
+    bool ShouldRegister() override {
+        const std::thread::id lender = std::this_thread::get_id();
+        std::thread helper([this, lender] {
+            BorrowLocator::ResolverBorrow borrow(locator_, lender);
+            locator_.helper_target = locator_.TryGet<BorrowTarget>();
+        });
+        helper.join();
+        return true;
+    }
+
+private:
+    BorrowLocator& locator_;
+};
+
 }
 
 SERVICELOCATOR_REGISTER(ThreadLocator, Spawner);
 SERVICELOCATOR_REGISTER(ThreadLocator, Slow);
+SERVICELOCATOR_REGISTER(BorrowLocator, BorrowWaiter);
+SERVICELOCATOR_REGISTER(BorrowLocator, BorrowTarget);
 
 static void ConcurrentFirstGetRunsOnReadyOnce() {
     ThreadLocator locator;
@@ -77,9 +112,32 @@ static void GetAfterBootstrapIsSharedAcrossThreads() {
     SL_CHECK(mismatches.load() == 0);
 }
 
+static void ResolveOnOneThreadReadyOnAnother() {
+    ThreadLocator locator;
+    locator.CreateAllServices();
+    locator.ResolveAllSlots();
+    Slow*       readied = nullptr;
+    std::thread boot([&locator, &readied] {
+        locator.ReadyAllServices();
+        readied = &locator.Get<Slow>();
+    });
+    boot.join();
+    SL_CHECK(locator.slow_ready_calls.load() == 1);
+    SL_CHECK(&locator.Get<Slow>() == readied);
+}
+
+static void WaitedJobResolvesWithBorrowedRole() {
+    BorrowLocator locator;
+    locator.Bootstrap();
+    SL_CHECK(locator.helper_target != nullptr);
+    SL_CHECK(locator.helper_target == &locator.Get<BorrowTarget>());
+}
+
 int main() {
     ConcurrentFirstGetRunsOnReadyOnce();
     GetAfterBootstrapIsSharedAcrossThreads();
+    ResolveOnOneThreadReadyOnAnother();
+    WaitedJobResolvesWithBorrowedRole();
     std::printf("threading_test passed\n");
     return 0;
 }

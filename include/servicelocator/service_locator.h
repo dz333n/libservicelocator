@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <initializer_list>
 #include <memory>
 #include <string>
 #include <thread>
@@ -56,8 +57,48 @@ public:
     void Bootstrap() {
         CreateAllServices();
         ResolveAllSlots();
+        ReadyAllServices();
+    }
+
+    void ResolveAllSlots() {
+        const int count = SlotCount();
+        for (int slot = 0; slot < count; ++slot) {
+            if (candidate_slots_[slot].pending.load(std::memory_order_acquire)) {
+                ResolveSlot(slot, "(sweep)");
+            }
+        }
+    }
+
+    void ReadyAllServices() {
         for (std::size_t i = 0; i < owned_.size(); ++i) MakeReady(owned_[i].get());
     }
+
+    class ResolverBorrow {
+    public:
+        ResolverBorrow(ServiceLocator& locator, std::thread::id lender) : locator_(locator) {
+            const std::thread::id me = std::this_thread::get_id();
+            for (const std::thread::id from : {lender, std::thread::id{}}) {
+                std::thread::id expected = from;
+                if (locator_.resolver_thread_.compare_exchange_strong(expected, me, std::memory_order_acq_rel)) {
+                    restore_  = from;
+                    borrowed_ = true;
+                    return;
+                }
+            }
+        }
+
+        ~ResolverBorrow() {
+            if (borrowed_) locator_.resolver_thread_.store(restore_, std::memory_order_release);
+        }
+
+        ResolverBorrow(const ResolverBorrow&)            = delete;
+        ResolverBorrow& operator=(const ResolverBorrow&) = delete;
+
+    private:
+        ServiceLocator& locator_;
+        std::thread::id restore_{};
+        bool            borrowed_ = false;
+    };
 
     static void AddServiceFactory(Factory factory) { Factories().push_back(factory); }
 
@@ -186,16 +227,7 @@ private:
         if (expected == me) return;
         Fail(std::string("Slot for ") + requester +
              " needs resolution on a second thread. Slot resolution runs on one "
-             "thread; other threads may Get only after Bootstrap() returns.");
-    }
-
-    void ResolveAllSlots() {
-        const int count = SlotCount();
-        for (int slot = 0; slot < count; ++slot) {
-            if (candidate_slots_[slot].pending.load(std::memory_order_acquire)) {
-                ResolveSlot(slot, "(sweep)");
-            }
-        }
+             "thread; other threads may Get only after ResolveAllSlots() returns.");
     }
 
     CandidateEntry* PickWinner(CandidateSlot& cs, bool fallback, const char* requester) {
