@@ -5,8 +5,9 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <initializer_list>
 #include <memory>
+#include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -15,6 +16,11 @@
 #include <vector>
 
 namespace servicelocator {
+
+class LocatorError : public std::logic_error {
+public:
+    using std::logic_error::logic_error;
+};
 
 template <class Derived, int Capacity>
 class ServiceLocator {
@@ -73,33 +79,6 @@ public:
         for (std::size_t i = 0; i < owned_.size(); ++i) MakeReady(owned_[i].get());
     }
 
-    class ResolverBorrow {
-    public:
-        ResolverBorrow(ServiceLocator& locator, std::thread::id lender) : locator_(locator) {
-            const std::thread::id me = std::this_thread::get_id();
-            for (const std::thread::id from : {lender, std::thread::id{}}) {
-                std::thread::id expected = from;
-                if (locator_.resolver_thread_.compare_exchange_strong(expected, me, std::memory_order_acq_rel)) {
-                    restore_  = from;
-                    borrowed_ = true;
-                    return;
-                }
-            }
-        }
-
-        ~ResolverBorrow() {
-            if (borrowed_) locator_.resolver_thread_.store(restore_, std::memory_order_release);
-        }
-
-        ResolverBorrow(const ResolverBorrow&)            = delete;
-        ResolverBorrow& operator=(const ResolverBorrow&) = delete;
-
-    private:
-        ServiceLocator& locator_;
-        std::thread::id restore_{};
-        bool            borrowed_ = false;
-    };
-
     static void AddServiceFactory(Factory factory) { Factories().push_back(factory); }
 
     template <class Base>
@@ -134,12 +113,26 @@ public:
 
     static void OnServiceDestroy(const Service&) {}
 
+    static void ShutDownService(Service& service) { service.OnShutdown(); }
+
+    [[noreturn]] static void RaiseLocatorError(const std::string& message) { throw LocatorError(message); }
+
 protected:
     ServiceLocator() = default;
-    ~ServiceLocator() { TearDown(); }
+    ~ServiceLocator() {
+        ShutDownAndDestroy([](Service& service) { ServiceLocator::ShutDownService(service); });
+    }
 
     void TearDown() {
-        for (auto it = owned_.rbegin(); it != owned_.rend(); ++it) (*it)->RunShutdown();
+        ShutDownAndDestroy([this](Service& service) { static_cast<Derived&>(*this).ShutDownService(service); });
+    }
+
+private:
+    template <class ShutDown>
+    void ShutDownAndDestroy(ShutDown&& shut_down) {
+        for (auto it = owned_.rbegin(); it != owned_.rend(); ++it) {
+            if ((*it)->BeginShutdown()) shut_down(**it);
+        }
         for (auto it = owned_.rbegin(); it != owned_.rend(); ++it) {
             Derived::OnServiceDestroy(**it);
             it->reset();
@@ -148,7 +141,6 @@ protected:
         for (CandidateSlot& cs : candidate_slots_) cs.entries.clear();
     }
 
-private:
     static constexpr int kNoSlot = -1;
 
     struct CandidateEntry {
@@ -160,19 +152,27 @@ private:
     };
 
     struct CandidateSlot {
-        std::vector<CandidateEntry> entries;
-        std::atomic<bool>           pending{false};
-        bool                        resolving = false;
-        int                         base_slot = kNoSlot;
+        std::vector<CandidateEntry>  entries;
+        std::atomic<bool>            pending{false};
+        std::mutex                   resolve_mtx;
+        std::atomic<std::thread::id> resolver{};
+        int                          base_slot = kNoSlot;
     };
 
-    [[noreturn]] void Fail(const std::string& message) {
-        if constexpr (std::is_member_function_pointer_v<decltype(&Derived::OnLocatorError)>) {
-            static_cast<Derived&>(*this).OnLocatorError(message.c_str());
-        } else {
-            Derived::OnLocatorError(message.c_str());
+    class SlotResolution {
+    public:
+        explicit SlotResolution(CandidateSlot& slot) : slot_(slot) {
+            slot_.resolver.store(std::this_thread::get_id(), std::memory_order_release);
         }
-    }
+        ~SlotResolution() { slot_.resolver.store(std::thread::id{}, std::memory_order_release); }
+        SlotResolution(const SlotResolution&)            = delete;
+        SlotResolution& operator=(const SlotResolution&) = delete;
+
+    private:
+        CandidateSlot& slot_;
+    };
+
+    [[noreturn]] void Fail(const std::string& message) { static_cast<Derived&>(*this).RaiseLocatorError(message); }
 
     static std::vector<Factory>& Factories() {
         static std::vector<Factory> factories;
@@ -214,20 +214,16 @@ private:
     void MakeReady(T* svc) {
         if constexpr (std::is_base_of_v<Service, T>) {
             Service* base = svc;
-            if (base->EnsureReady() == Service::ReadyResult::Cycle) {
-                Fail(std::string("Cycle in the service OnReady graph at ") + typeid(*base).name() + ".");
-            }
+            const Service::ReadyResult ready = base->EnsureReady();
+            if (ready != Service::ReadyResult::Ready) FailNotReady(ready, typeid(*base).name());
         }
     }
 
-    void ClaimResolverThread(const char* requester) {
-        const std::thread::id me = std::this_thread::get_id();
-        std::thread::id expected{};
-        if (resolver_thread_.compare_exchange_strong(expected, me, std::memory_order_acq_rel)) return;
-        if (expected == me) return;
-        Fail(std::string("Slot for ") + requester +
-             " needs resolution on a second thread. Slot resolution runs on one "
-             "thread; other threads may Get only after ResolveAllSlots() returns.");
+    [[noreturn]] void FailNotReady(Service::ReadyResult ready, const char* type_name) {
+        if (ready == Service::ReadyResult::Cycle) {
+            Fail(std::string("Cycle in the service OnReady graph at ") + type_name + ".");
+        }
+        Fail(std::string("The OnReady of ") + type_name + " failed earlier.");
     }
 
     CandidateEntry* PickWinner(CandidateSlot& cs, bool fallback, const char* requester) {
@@ -252,13 +248,14 @@ private:
             if (cs.base_slot != kNoSlot) ResolveSlot(cs.base_slot, requester);
             return;
         }
-        ClaimResolverThread(requester);
-        if (cs.resolving) {
+        if (cs.resolver.load(std::memory_order_acquire) == std::this_thread::get_id()) {
             Fail(std::string("ShouldRegister cycle while resolving the slot for ") + requester +
                  " - a candidate's ShouldRegister called Get<>() back into a Base that "
                  "is itself being resolved.");
         }
-        cs.resolving = true;
+        const std::lock_guard<std::mutex> lock(cs.resolve_mtx);
+        if (!cs.pending.load(std::memory_order_relaxed)) return;
+        const SlotResolution resolution(cs);
 
         CandidateEntry* winner = PickWinner(cs, false, requester);
         if (winner == nullptr) winner = PickWinner(cs, true, requester);
@@ -268,10 +265,10 @@ private:
             if (winner->concrete_slot != kNoSlot) {
                 services_[winner->concrete_slot].store(winner->concrete_ptr, std::memory_order_release);
             }
+            const std::lock_guard<std::mutex> owned_lock(owned_mtx_);
             owned_.push_back(std::move(winner->instance));
         }
         cs.entries.clear();
-        cs.resolving = false;
         cs.pending.store(false, std::memory_order_release);
     }
 
@@ -280,7 +277,7 @@ private:
     std::array<std::atomic<void*>, Capacity> services_{};
     std::array<CandidateSlot, Capacity>      candidate_slots_{};
     std::vector<std::unique_ptr<Service>>    owned_;
-    std::atomic<std::thread::id>             resolver_thread_{};
+    std::mutex                               owned_mtx_;
     bool                                     services_created_ = false;
 };
 

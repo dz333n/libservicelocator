@@ -13,8 +13,6 @@ constexpr int kThreads = 8;
 
 class ThreadLocator : public servicelocator::ServiceLocator<ThreadLocator, 16> {
 public:
-    SL_FAIL_ON_LOCATOR_ERROR
-
     ~ThreadLocator() { TearDown(); }
 
     std::atomic<int> slow_ready_calls{0};
@@ -49,45 +47,60 @@ private:
     ThreadLocator& locator_;
 };
 
-class BorrowTarget;
+class HelperTarget;
 
-class BorrowLocator : public servicelocator::ServiceLocator<BorrowLocator, 8> {
+class HelperLocator : public servicelocator::ServiceLocator<HelperLocator, 8> {
 public:
-    SL_FAIL_ON_LOCATOR_ERROR
+    ~HelperLocator() { TearDown(); }
 
-    ~BorrowLocator() { TearDown(); }
-
-    BorrowTarget* helper_target = nullptr;
+    HelperTarget* helper_target = nullptr;
 };
 
-class BorrowTarget : public servicelocator::Service {
+class HelperTarget : public servicelocator::Service {
 public:
-    explicit BorrowTarget(BorrowLocator&) {}
+    explicit HelperTarget(HelperLocator&) {}
 };
 
-class BorrowWaiter : public servicelocator::Service {
+class HelperWaiter : public servicelocator::Service {
 public:
-    explicit BorrowWaiter(BorrowLocator& locator) : locator_(locator) {}
+    explicit HelperWaiter(HelperLocator& locator) : locator_(locator) {}
     bool ShouldRegister() override {
-        const std::thread::id lender = std::this_thread::get_id();
-        std::thread helper([this, lender] {
-            BorrowLocator::ResolverBorrow borrow(locator_, lender);
-            locator_.helper_target = locator_.TryGet<BorrowTarget>();
-        });
+        std::thread helper([this] { locator_.helper_target = locator_.TryGet<HelperTarget>(); });
         helper.join();
         return true;
     }
 
 private:
-    BorrowLocator& locator_;
+    HelperLocator& locator_;
+};
+
+class RaceLocator : public servicelocator::ServiceLocator<RaceLocator, 8> {
+public:
+    ~RaceLocator() { TearDown(); }
+
+    std::atomic<int> picks{0};
+};
+
+class RacePick : public servicelocator::Service {
+public:
+    explicit RacePick(RaceLocator& locator) : locator_(locator) {}
+    bool ShouldRegister() override {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        locator_.picks.fetch_add(1);
+        return true;
+    }
+
+private:
+    RaceLocator& locator_;
 };
 
 }
 
 SERVICELOCATOR_REGISTER(ThreadLocator, Spawner);
 SERVICELOCATOR_REGISTER(ThreadLocator, Slow);
-SERVICELOCATOR_REGISTER(BorrowLocator, BorrowWaiter);
-SERVICELOCATOR_REGISTER(BorrowLocator, BorrowTarget);
+SERVICELOCATOR_REGISTER(HelperLocator, HelperWaiter);
+SERVICELOCATOR_REGISTER(HelperLocator, HelperTarget);
+SERVICELOCATOR_REGISTER(RaceLocator, RacePick);
 
 static void ConcurrentFirstGetRunsOnReadyOnce() {
     ThreadLocator locator;
@@ -126,18 +139,32 @@ static void ResolveOnOneThreadReadyOnAnother() {
     SL_CHECK(&locator.Get<Slow>() == readied);
 }
 
-static void WaitedJobResolvesWithBorrowedRole() {
-    BorrowLocator locator;
+static void HelperThreadResolvesWhileResolverWaits() {
+    HelperLocator locator;
     locator.Bootstrap();
     SL_CHECK(locator.helper_target != nullptr);
-    SL_CHECK(locator.helper_target == &locator.Get<BorrowTarget>());
+    SL_CHECK(locator.helper_target == &locator.Get<HelperTarget>());
+}
+
+static void ConcurrentFirstGetResolvesSlotOnce() {
+    RaceLocator locator;
+    locator.CreateAllServices();
+    std::vector<RacePick*>   seen(kThreads, nullptr);
+    std::vector<std::thread> threads;
+    for (int i = 0; i < kThreads; ++i) {
+        threads.emplace_back([&locator, &seen, i] { seen[i] = &locator.Get<RacePick>(); });
+    }
+    for (std::thread& t : threads) t.join();
+    for (RacePick* pick : seen) SL_CHECK(pick == seen.front() && pick != nullptr);
+    SL_CHECK(locator.picks.load() == 1);
 }
 
 int main() {
     ConcurrentFirstGetRunsOnReadyOnce();
     GetAfterBootstrapIsSharedAcrossThreads();
     ResolveOnOneThreadReadyOnAnother();
-    WaitedJobResolvesWithBorrowedRole();
+    HelperThreadResolvesWhileResolverWaits();
+    ConcurrentFirstGetResolvesSlotOnce();
     std::printf("threading_test passed\n");
     return 0;
 }

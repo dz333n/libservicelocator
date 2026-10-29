@@ -4,10 +4,7 @@
 
 #include <servicelocator/service_locator.h>
 
-class ArchiveLocator : public servicelocator::ServiceLocator<ArchiveLocator, 8> {
-public:
-    SL_FAIL_ON_LOCATOR_ERROR
-};
+class ArchiveLocator : public servicelocator::ServiceLocator<ArchiveLocator, 8> {};
 
 class ArchivedService : public servicelocator::Service {
 public:

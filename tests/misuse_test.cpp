@@ -3,19 +3,11 @@
 #include <servicelocator/service_locator.h>
 
 #include <cstring>
-#include <thread>
 
 namespace {
 
 template <class Self, int Capacity>
-class MisuseLocator : public servicelocator::ServiceLocator<Self, Capacity> {
-public:
-    [[noreturn]] static void OnLocatorError(const char* message) {
-        std::printf("servicelocator error: %s\n", message);
-        std::fflush(stdout);
-        std::exit(0);
-    }
-};
+using MisuseLocator = servicelocator::ServiceLocator<Self, Capacity>;
 
 class NoWinnerLocator : public MisuseLocator<NoWinnerLocator, 8> {};
 class NoWinnerBase : public servicelocator::Service {
@@ -112,40 +104,6 @@ public:
     using TwoBasesInner::TwoBasesInner;
 };
 
-class InstanceHookLocator : public servicelocator::ServiceLocator<InstanceHookLocator, 8> {
-public:
-    [[noreturn]] void OnLocatorError(const char* message) {
-        std::printf("servicelocator error: [%s] %s\n", owner_, message);
-        std::fflush(stdout);
-        std::exit(0);
-    }
-
-private:
-    const char* owner_ = "instance hook";
-};
-class InstanceHookMissing : public servicelocator::Service {
-public:
-    explicit InstanceHookMissing(InstanceHookLocator&) {}
-};
-
-class SecondThreadLocator : public MisuseLocator<SecondThreadLocator, 8> {};
-class SecondThreadTarget : public servicelocator::Service {
-public:
-    explicit SecondThreadTarget(SecondThreadLocator&) {}
-};
-class SecondThreadProbe : public servicelocator::Service {
-public:
-    explicit SecondThreadProbe(SecondThreadLocator& locator) : locator_(locator) {}
-    bool ShouldRegister() override {
-        std::thread worker([this] { locator_.TryGet<SecondThreadTarget>(); });
-        worker.join();
-        return true;
-    }
-
-private:
-    SecondThreadLocator& locator_;
-};
-
 }
 
 SERVICELOCATOR_REGISTER_AS(NoWinnerLocator, NoWinnerImpl, NoWinnerBase);
@@ -164,8 +122,6 @@ SERVICELOCATOR_REGISTER_AS(TwoBasesLocator, TwoBasesImpl, TwoBasesOuter);
          locator.AddCandidateAlsoSelf<TwoBasesImpl, TwoBasesInner>(
              std::make_unique<TwoBasesImpl>(locator), false);
      }), true);
-SERVICELOCATOR_REGISTER(SecondThreadLocator, SecondThreadProbe);
-SERVICELOCATOR_REGISTER(SecondThreadLocator, SecondThreadTarget);
 
 static void RunScenario(const char* name) {
     if (std::strcmp(name, "no_winner") == 0) {
@@ -194,13 +150,6 @@ static void RunScenario(const char* name) {
     } else if (std::strcmp(name, "two_bases") == 0) {
         TwoBasesLocator locator;
         locator.Bootstrap();
-    } else if (std::strcmp(name, "instance_hook") == 0) {
-        InstanceHookLocator locator;
-        locator.Bootstrap();
-        locator.Get<InstanceHookMissing>();
-    } else if (std::strcmp(name, "second_thread") == 0) {
-        SecondThreadLocator locator;
-        locator.Bootstrap();
     } else {
         std::printf("unknown scenario %s\n", name);
         std::exit(1);
@@ -212,7 +161,12 @@ int main(int argc, char** argv) {
         std::printf("usage: misuse_test <scenario>\n");
         return 1;
     }
-    RunScenario(argv[1]);
+    try {
+        RunScenario(argv[1]);
+    } catch (const servicelocator::LocatorError& error) {
+        std::printf("servicelocator error: %s\n", error.what());
+        return 0;
+    }
     std::printf("NO LOCATOR ERROR\n");
     return 1;
 }

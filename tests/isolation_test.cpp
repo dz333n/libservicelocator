@@ -4,15 +4,9 @@
 
 namespace {
 
-class EngineLocator : public servicelocator::ServiceLocator<EngineLocator, 16> {
-public:
-    SL_FAIL_ON_LOCATOR_ERROR
-};
+class EngineLocator : public servicelocator::ServiceLocator<EngineLocator, 16> {};
 
-class FrontendLocator : public servicelocator::ServiceLocator<FrontendLocator, 16> {
-public:
-    SL_FAIL_ON_LOCATOR_ERROR
-};
+class FrontendLocator : public servicelocator::ServiceLocator<FrontendLocator, 16> {};
 
 class Translator : public servicelocator::Service {
 public:

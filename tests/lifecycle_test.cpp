@@ -15,8 +15,6 @@ class LoggedService;
 
 class LifecycleLocator : public servicelocator::ServiceLocator<LifecycleLocator, 64> {
 public:
-    SL_FAIL_ON_LOCATOR_ERROR
-
     explicit LifecycleLocator(EventLog& event_log) : log(event_log) {}
     ~LifecycleLocator() { TearDown(); }
 

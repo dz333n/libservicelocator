@@ -10,9 +10,3 @@
             std::exit(1);                                                          \
         }                                                                          \
     } while (0)
-
-#define SL_FAIL_ON_LOCATOR_ERROR                                                   \
-    [[noreturn]] static void OnLocatorError(const char* message) {                 \
-        std::printf("servicelocator error: %s\n", message);                        \
-        std::exit(1);                                                              \
-    }

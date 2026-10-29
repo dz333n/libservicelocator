@@ -6,8 +6,6 @@ namespace {
 
 class ResolutionLocator : public servicelocator::ServiceLocator<ResolutionLocator, 64> {
 public:
-    SL_FAIL_ON_LOCATOR_ERROR
-
     ~ResolutionLocator() { TearDown(); }
 
     bool flash_matches = true;
